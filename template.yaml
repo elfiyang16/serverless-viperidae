@@ -1,0 +1,246 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Serverless stack that process CSV files with S3, SQS, DynamoDb, and API Gateway.
+Globals:
+  Function:
+    Timeout: 3
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref ViperTable
+        SQS_QUEUE_URL: !Ref ViperQueue
+
+Parameters:
+  DataBucketName:
+    Type: String
+    Description: S3 bucket for csv files
+    Default: serverless-viperidae-csv
+Resources:
+  # Api Gateways
+  ViperApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+  GetMessagesFunction:
+    Type: AWS::Serverless::Function
+    Description: Get all messages in DynamoDB table (scan)
+    Properties:
+      Description: Get all messages in DynamoDB table (scan)
+      CodeUri: apigtw_dynamo/
+      Handler: handler.getMessages
+      Runtime: nodejs12.x
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ViperTable
+      Events:
+        getMessages:
+          Type: Api
+          Properties:
+            Path: /message
+            Method: get
+            RestApiId: !Ref ViperApi
+  GetMessageFunction:
+    Type: AWS::Serverless::Function
+    Description: Get single message based on timestamp and location
+    Properties:
+      Description: Get single message based on timestamp and location
+      CodeUri: apigtw_dynamo/
+      Handler: handler.getMessage
+      Runtime: nodejs12.x
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ViperTable
+      Events:
+        getMessages:
+          Type: Api
+          Properties:
+            Path: /message/{date}
+            Method: get
+            RestApiId: !Ref ViperApi
+  PostMessageFunction:
+    Type: AWS::Serverless::Function
+    Description: Create new message item in DynamoDB table
+    Properties:
+      Description: Create new message item in DynamoDB table
+      CodeUri: apigtw_dynamo/
+      Handler: handler.postMessage
+      Runtime: nodejs12.x
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ViperTable
+      Events:
+        postMessage:
+          Type: Api
+          Properties:
+            Path: /message
+            Method: post
+            RestApiId: !Ref ViperApi
+  PutMessageFunction:
+    Type: AWS::Serverless::Function
+    Description: Update message item in DynamoDB table
+    Properties:
+      Description: Update message item in DynamoDB table
+      CodeUri: apigtw_dynamo/
+      Handler: handler.putMessage
+      Runtime: nodejs12.x
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ViperTable
+      Events:
+        putMessage:
+          Type: Api
+          Properties:
+            Path: /message/{date}
+            Method: put
+            RestApiId: !Ref ViperApi
+  DeleteMessageFunction:
+    Type: AWS::Serverless::Function
+    Description: Delete message item in DynamoDB table
+    Properties:
+      Description: Delete message item in DynamoDB table
+      CodeUri: apigtw_dynamo/
+      Handler: handler.putMessage
+      Runtime: nodejs12.x
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ViperTable
+      Events:
+        deleteMessage:
+          Type: Api
+          Properties:
+            Path: /message/{date}
+            Method: delete
+            RestApiId: !Ref ViperApi
+  # SQS
+  ViperQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: 5
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+  # DynamoDBTable
+  ViperTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: date
+          AttributeType: S
+        - AttributeName: time
+          AttributeType: S
+      KeySchema:
+        - AttributeName: date
+          KeyType: HASH
+        - AttributeName: time
+          KeyType: RANGE
+  # SQS --> DynamoDB
+  SqsToDynamoDbFunction:
+    Type: AWS::Serverless::Function
+    Description: Responds to SQS Event - Sends to Dynamodb
+    Properties:
+      Description: Post new message to SQS
+      # CodeUri:
+      Handler: sqs_dynamo_lambda.lambda_handler
+      Runtime: python3.8
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ViperTable
+      Events:
+        SqsToDynamoDb:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ViperQueue.Arn
+            BatchSize: 10
+            Enabled: true
+  # S3 bucket <-- SQS
+  ViperDataBucket:
+    Type: AWS::S3::Bucket
+    DependsOn:
+      - S3ToSQSFunctionPermission
+    Properties:
+      BucketName: !Ref DataBucketName
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt S3ToSQSFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .csv
+  S3ToSQSFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref S3ToSQSFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "arn:aws:s3:::${DataBucketName}"
+      SourceAccount: !Ref AWS::AccountId
+  S3ToSQSFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: allowLogging
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:*
+                Resource: arn:aws:logs:*:*:*
+        - PolicyName: getObjects
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${DataBucketName}/*"
+        - PolicyName: produceToQueue
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt ViperQueue.Arn
+  S3ToSQSFunction:
+    Type: AWS::Serverless::Function
+    Description: Respond to S3 Events
+    Properties:
+      Description: Responds to S3 Event - Sends to SQS
+      # CodeUri: lambda_s3_to_sqs/
+      Handler: s3_sqs_lambda.lambda_handler
+      Runtime: python3.8
+      Role: !GetAtt S3ToSQSFunctionExecutionRole.Arn
+
+Outputs:
+  MyStacksRegion:
+    Description: "Region where cfn stack is located"
+    Value: !Ref AWS::Region
+  ViperBucket:
+    Description: "S3 bucket where CSV files are placed"
+    Value: !Ref DataBucketName
+  ViperTable:
+    Description: "Name of DynamoDB table"
+    Value: !Ref ViperTable
+  ViperQueueArn:
+    Description: "Arn of SQS Queue"
+    Value: !GetAtt ViperQueue.Arn
+  ViperQueueUrl:
+    Description: "URL of SQS Queue"
+    Value: !Ref ViperQueue
+  GetMessagesApi:
+    Description: "Example API Gateway endpoint: GetMessagesFunction"
+    Value: !Sub "https://${ViperApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/getMessages/"
