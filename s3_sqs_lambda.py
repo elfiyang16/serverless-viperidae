@@ -9,7 +9,7 @@ from botocore.exceptions import ClientError
 
 # set env var
 sqs_queue_url = os.getenv("SQS_QUEUE_URL")
-dynamo_table = os.getenv("DYNAMO_TABLE")
+dynamo_table = os.getenv("TABLE_NAME")
 
 # get boto client
 sqs_client = boto3.client("sqs")
@@ -22,8 +22,6 @@ s3_client = boto3.client("s3")
 def lambda_handler(event, context):
     print("receievd event as:", json.dumps(event))
     bucket = event["Records"][0]["s3"]["bucket"]["name"]
-    key2 = event["Records"][0]["s3"]["bucket"]["object"]["key"]
-    print("KEY2", key2)
     key = urllib.parse.unquote_plus(
         event['Records'][0]['s3']['object']['key'], encoding='utf-8')
     try:
@@ -97,7 +95,7 @@ def send_sqs_msg(msg):
     try:
         msg = sqs_client.send_message(
             QueueUrl=sqs_queue_url,
-            MessageBoday=msg,
+            MessageBody=msg,
             MessageAttributes={
                 "Method": {
                     "StringValue": "POST",
